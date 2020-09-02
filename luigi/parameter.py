@@ -196,6 +196,8 @@ class Parameter:
 
     def _get_value(self, task_name, param_name):
         for value, warn in self._value_iterator(task_name, param_name):
+            # if task_name is not "retcode":
+                # from IPython import embed;embed()
             if value != _no_value:
                 if warn:
                     warnings.warn(warn, DeprecationWarning)
@@ -1257,3 +1259,79 @@ class ChoiceParameter(Parameter):
         else:
             raise ValueError("{var} is not a valid choice from {choices}".format(
                 var=var, choices=self._choices))
+
+
+class ParameterContainer(DictParameter):
+    """
+    Parameter whose values of different Luigi Parameters.
+
+    In the task definition, use
+
+    .. code-block:: python
+        class MyContainer(luigi.ParameterContainer)
+            layers = luigi.IntParameter(default=3)
+            nodes = luigi.IntParameter(default=2)
+            opt = luigi.ChoiceParameter(choices=["SGD", "ADAM", "RMS"], default="ADAM")
+
+
+        class MyTask(luigi.Task):
+            conf_a = MyContainer(layers=2)
+            conf_b = MyContainer(opt="SGD")
+
+            def run(self):
+                model_a = init_model_from_json(conf_a)
+                model_b = init_model_from_json(conf_b)
+
+
+
+    At the command line, use
+
+    .. code-block:: console
+
+        $ luigi --module my_tasks MyTask --conf_a <JSON string> --conf_b <JSON string>
+
+    The values in the <JSON string> will be used and the default values of the parameters whenever given.
+    Unlike for the DictParameter, every Item of the <JSON string> needs to be defined in the
+    ParameterContainer, otherwise a ValueError will be thrown
+    """
+    def __init__(self, *args, **kwargs):
+        self._member_params_names = [obj for obj in dir(self) if isinstance(getattr(self, obj), Parameter)]
+        # change given values
+        self._member_param_defaults = {}
+        for mpn in self._member_params_names:
+            if kwargs.get(mpn, None) is not None:
+                self._member_param_defaults[mpn] = kwargs.pop(mpn, None)
+        super(ParameterContainer, self).__init__(*args, **kwargs)
+
+    def _get_value(self, task_name, param_name):
+        ret = {}
+        for name in self._member_params_names:
+            for value, warn in getattr(self, name)._value_iterator(task_name, name):
+                if value != _no_value:
+                    if warn:
+                        warnings.warn(warn, DeprecationWarning)
+                    ret[name] = value
+                else:
+                    ret[name] = _no_value
+        return ret
+
+    def _value_iterator(self, task_name, param_name):
+        raise NotImplementedError("This function is not used in ParamContainers")
+
+    def parse(self, source):
+        ret = {}
+        parsed_dict = json.loads(source, object_pairs_hook=FrozenOrderedDict)
+        # check if given items are valid
+        for key, value in parsed_dict.items():
+            if key not in self._member_params_names:
+                raise ValueError("Key {} is not part of the Container. Valid keys are: {}".format(key, self._member_params_names))
+            else:
+                ret[key] = getattr(self, key).parse(value)
+        # fill in defaults if missing
+        missing_keys = [mk for mk in self._member_params_names if mk not in parsed_dict.keys()]
+        for mk in missing_keys:
+            if self._member_param_defaults.get(mk, None) is not None:
+                ret[mk] = self._member_param_defaults[mk]
+            else:
+                ret[mk] = getattr(self, mk)._default
+        return ret
